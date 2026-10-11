@@ -1,0 +1,76 @@
+name: Call Graph
+
+# Static AST call graph of the httpx package -> graph.json (uploaded as an artifact).
+
+on:
+  push:
+    paths:
+      - "httpx/**"
+      - "tools/callgraph/**"
+      - ".github/workflows/callgraph.yml"
+  pull_request:
+    paths:
+      - "httpx/**"
+      - "tools/callgraph/**"
+      - ".github/workflows/callgraph.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  selftest:
+    name: "Self-test (Python ${{ matrix.python-version }})"
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "${{ matrix.python-version }}"
+      - name: Run call-graph self-test
+        run: python tools/callgraph/selftest.py
+
+  callgraph:
+    name: Build graph.json
+    needs: selftest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Parse AST and extract call graph
+        run: |
+          python tools/callgraph/callgraph.py httpx \
+            --root . \
+            -o out/graph.json \
+            --summary out/summary.md
+
+      - name: Validate graph.json
+        run: |
+          python - <<'EOF'
+          import json
+          g = json.load(open("out/graph.json"))
+          s = g["stats"]
+          ids = {n["id"] for n in g["nodes"]}
+          assert s["classes"] and s["methods"] and s["functions"], s
+          assert s["internal_edges"] > 0, s
+          missing = [e for e in g["edges"] if e["source"] not in ids or e["target"] not in ids]
+          assert not missing, missing[:5]
+          print("graph.json OK:", s)
+          EOF
+
+      - name: Job summary
+        run: cat out/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload graph.json
+        uses: actions/upload-artifact@v4
+        with:
+          name: callgraph-${{ github.sha }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 30
