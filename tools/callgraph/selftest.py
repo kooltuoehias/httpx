@@ -1,0 +1,221 @@
+#!/usr/bin/env python3
+"""Self-test for callgraph.py on a small fixture package (no pytest needed).
+
+Named selftest.py (not test_*.py) so httpx's own pytest run won't collect it.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+import tempfile
+import textwrap
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import callgraph  # noqa: E402
+
+FILES = {
+    "pkg/__init__.py": """
+        from .core import Engine, helper
+        from . import util
+    """,
+    "pkg/util.py": """
+        import os
+
+        def join_path(a, b):
+            return os.path.join(a, b)
+
+        def log(msg):
+            print(msg)
+    """,
+    "pkg/core.py": """
+        import typing
+        from .util import log, join_path
+        from . import util
+
+        T = typing.TypeVar("T", bound="Engine")
+
+        def helper(x):
+            log(x)
+            return util.join_path(x, "y")
+
+        class Part:
+            def spin(self) -> None:
+                log("spin")
+
+            def name(self) -> str:
+                return "p"
+
+        class Base:
+            def __init__(self) -> None:
+                self.part = Part()
+
+            def start(self) -> "Part":
+                self.prepare()
+                return self.part
+
+            def prepare(self) -> None:
+                pass
+
+            @property
+            def main_part(self) -> Part:
+                return self.part
+
+            @classmethod
+            def build(cls):
+                return cls()
+
+        class Engine(Base):
+            def __init__(self, fuel: int) -> None:
+                super().__init__()
+                self.fuel = fuel
+
+            def __enter__(self: T) -> T:
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def prepare(self) -> None:
+                super().prepare()
+                helper("x")
+
+            def run(self, other: typing.Optional["Part"] = None) -> None:
+                self.start().spin()
+                self.part.spin()
+                self.main_part.name()
+                if other is not None:
+                    other.name()
+
+                def inner():
+                    self.prepare()
+
+                inner()
+                p = Part()
+                p.spin()
+                len([1])
+                unknown_obj().foo()
+
+        def make() -> Engine:
+            return Engine(1)
+
+        def use():
+            e = make()
+            e.run()
+            with Engine(2) as eng:
+                eng.prepare()
+            make().start()
+            Engine.prepare(e)
+
+        helper("module-level")
+    """,
+    "pkg/cli.py": """
+        import pkg
+        from pkg import Engine as E
+
+        async def fetch() -> "E":
+            return E(0)
+
+        def main():
+            pkg.Engine(3).run()
+            E(4)
+            pkg.helper("z")
+
+        async def amain():
+            eng = await fetch()
+            eng.prepare()
+    """,
+}
+
+C = "pkg.core"
+EXPECTED = [
+    # (source, target, kind)
+    (f"{C}.helper", "pkg.util.log", "call"),
+    (f"{C}.helper", "pkg.util.join_path", "call"),
+    ("pkg.util.join_path", "os.path.join", "call"),
+    ("pkg.util.log", "builtins.print", "call"),
+    (f"{C}.Part.spin", "pkg.util.log", "call"),
+    (f"{C}.Base.__init__", f"{C}.Part", "instantiate"),
+    (f"{C}.Base.start", f"{C}.Base.prepare", "call"),
+    (f"{C}.Base.build", f"{C}.Base", "instantiate"),
+    (f"{C}.Engine.__init__", f"{C}.Base.__init__", "call"),
+    (f"{C}.Engine.prepare", f"{C}.Base.prepare", "call"),
+    (f"{C}.Engine.prepare", f"{C}.helper", "call"),
+    (f"{C}.Engine.run", f"{C}.Base.start", "call"),
+    (f"{C}.Engine.run", f"{C}.Part.spin", "call"),
+    (f"{C}.Engine.run", f"{C}.Part.name", "call"),
+    (f"{C}.Engine.run", f"{C}.Engine.run.<locals>.inner", "call"),
+    (f"{C}.Engine.run", f"{C}.Part", "instantiate"),
+    (f"{C}.Engine.run", "builtins.len", "call"),
+    (f"{C}.Engine.run.<locals>.inner", f"{C}.Engine.prepare", "call"),
+    (f"{C}.make", f"{C}.Engine", "instantiate"),
+    (f"{C}.make", f"{C}.Engine.__init__", "call"),
+    (f"{C}.use", f"{C}.make", "call"),
+    (f"{C}.use", f"{C}.Engine.run", "call"),
+    (f"{C}.use", f"{C}.Engine.prepare", "call"),
+    (f"{C}.use", f"{C}.Base.start", "call"),
+    (C, f"{C}.helper", "call"),
+    ("pkg.cli.main", f"{C}.Engine", "instantiate"),
+    ("pkg.cli.main", f"{C}.Engine.run", "call"),
+    ("pkg.cli.main", f"{C}.helper", "call"),
+    ("pkg.cli.amain", "pkg.cli.fetch", "call"),
+    ("pkg.cli.amain", f"{C}.Engine.prepare", "call"),
+]
+
+FORBIDDEN = [
+    # Base.start's self.prepare() must not be bound to the subclass override
+    (f"{C}.Base.start", f"{C}.Engine.prepare", "call"),
+]
+
+EXPECTED_NODES = {
+    "pkg": "module",
+    f"{C}.Engine": "class",
+    f"{C}.Engine.run": "method",
+    f"{C}.Engine.run.<locals>.inner": "function",
+    f"{C}.helper": "function",
+    "pkg.cli.fetch": "function",
+}
+
+
+def main() -> int:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for rel, src in FILES.items():
+            p = root / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(textwrap.dedent(src).lstrip(), encoding="utf-8")
+        out = root / "graph.json"
+        rc = callgraph.main(
+            [str(root / "pkg"), "--root", str(root), "-o", str(out), "--include-builtins", "--include-unresolved"]
+        )
+        assert rc == 0, rc
+        g = json.loads(out.read_text())
+
+    edges = {(e["source"], e["target"], e["kind"]) for e in g["edges"]}
+    kinds = {n["id"]: n["kind"] for n in g["nodes"]}
+    failures = []
+    for exp in EXPECTED:
+        if exp not in edges:
+            failures.append(f"missing edge   {exp}")
+    for bad in FORBIDDEN:
+        if bad in edges:
+            failures.append(f"unexpected edge {bad}")
+    for nid, kind in EXPECTED_NODES.items():
+        if kinds.get(nid) != kind:
+            failures.append(f"node {nid}: expected {kind}, got {kinds.get(nid)}")
+    if not any(e["target"].startswith("?") for e in g["edges"]):
+        failures.append("expected the unknown_obj() call to be reported as unresolved")
+    for e in g["edges"]:
+        assert e["count"] == len(e["lines"]) > 0, e
+
+    if failures:
+        print("\n".join(failures))
+        print(f"FAILED {len(failures)} check(s)")
+        return 1
+    print(f"OK: {len(EXPECTED)} edges, {len(EXPECTED_NODES)} nodes, stats={g['stats']}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
