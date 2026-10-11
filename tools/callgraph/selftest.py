@@ -14,6 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import callgraph  # noqa: E402
+import check_outputs  # noqa: E402
 
 FILES = {
     "pkg/__init__.py": """
@@ -208,6 +209,27 @@ def main() -> int:
         failures.append("expected the unknown_obj() call to be reported as unresolved")
     for e in g["edges"]:
         assert e["count"] == len(e["lines"]) > 0, e
+
+    # node source text
+    by_id = {n["id"]: n for n in g["nodes"]}
+    util_src = textwrap.dedent(FILES["pkg/util.py"]).lstrip()
+    text_checks = [
+        ("pkg.util", lambda t: t == util_src, "module text is the whole file"),
+        (f"{C}.helper", lambda t: t.startswith("def helper(x):") and t.rstrip().endswith('"y")'), "function span"),
+        (f"{C}.Base.main_part", lambda t: t.startswith("    @property\n    def main_part"), "decorators included"),
+        (f"{C}.Engine.run.<locals>.inner", lambda t: t.strip() == "def inner():\n            self.prepare()", "nested"),
+        (f"{C}.Part", lambda t: "def spin" in t and "def name" in t and "class Base" not in t, "class span"),
+        ("os.path.join", lambda t: t == "", "external has empty text"),
+    ]
+    for nid, ok, what in text_checks:
+        t = by_id.get(nid, {}).get("text")
+        if t is None or not ok(t):
+            failures.append(f"text check failed ({what}): {nid} -> {t!r}")
+    for n in g["nodes"]:
+        if n["kind"] in ("module", "class", "function", "method") and not n.get("text"):
+            failures.append(f"empty text on {n['id']}")
+        if n["kind"] in ("class", "function", "method") and not check_outputs.parses_as_def(n):
+            failures.append(f"text of {n['id']} is not exactly its definition")
 
     if failures:
         print("\n".join(failures))

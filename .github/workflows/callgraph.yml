@@ -37,8 +37,13 @@ jobs:
     name: Build graph.json
     needs: selftest
     runs-on: ubuntu-latest
+    env:
+      # Analyse the real head commit, not the PR's synthetic merge commit.
+      COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.COMMIT }}
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -50,19 +55,32 @@ jobs:
             -o out/graph.json \
             --summary out/summary.md
 
-      - name: Validate graph.json
+      - name: Validate graph.json (incl. node text)
+        run: python tools/callgraph/check_outputs.py out/graph.json
+
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ runner.os }}-snowflake-arctic-embed-m-v1.5
+
+      - name: Install embedding dependencies (CPU)
         run: |
-          python - <<'EOF'
-          import json
-          g = json.load(open("out/graph.json"))
-          s = g["stats"]
-          ids = {n["id"] for n in g["nodes"]}
-          assert s["classes"] and s["methods"] and s["functions"], s
-          assert s["internal_edges"] > 0, s
-          missing = [e for e in g["edges"] if e["source"] not in ids or e["target"] not in ids]
-          assert not missing, missing[:5]
-          print("graph.json OK:", s)
-          EOF
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install sentence-transformers numpy
+
+      - name: Embed node text (256-d)
+        env:
+          HF_HUB_DISABLE_TELEMETRY: "1"
+        run: |
+          python tools/callgraph/embed.py out/graph.json \
+            --out-dir out/embeddings \
+            --repo "${GITHUB_REPOSITORY#*/}" \
+            --dim 256
+
+      - name: Validate embeddings
+        run: python tools/callgraph/check_outputs.py out/graph.json --embeddings out/embeddings
 
       - name: Job summary
         run: cat out/summary.md >> "$GITHUB_STEP_SUMMARY"
@@ -70,7 +88,7 @@ jobs:
       - name: Upload graph.json
         uses: actions/upload-artifact@v4
         with:
-          name: callgraph-${{ github.sha }}
+          name: callgraph-${{ env.COMMIT }}
           path: out/
           if-no-files-found: error
           retention-days: 30

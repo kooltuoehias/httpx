@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator, Optional
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 BUILTIN_NAMES = frozenset(dir(builtins))
 DEFAULT_EXCLUDES = frozenset({".git", ".venv", "venv", "__pycache__", "build", "dist", "node_modules", ".tox"})
@@ -230,6 +230,7 @@ class Project:
         self.class_attr_types: dict = {}
         self.module_var_types: dict = {}
         self.warnings: list = []
+        self.sources: dict = {}  # module -> source lines (keepends)
         self._ctx_cache: dict = {}
         self._ret_cache: dict = {}
 
@@ -247,6 +248,7 @@ class Project:
             rel = f.resolve().relative_to(self.root.resolve()).as_posix()
             mi = ModuleInfo(name=name, file=rel, is_pkg=is_pkg, tree=tree)
             self.modules[name] = mi
+            self.sources[name] = src.splitlines(keepends=True)
             self.top_packages.add(name.split(".")[0])
             mdef = Def(
                 id=name,
@@ -895,7 +897,24 @@ class Project:
 
     # ---- graph -------------------------------------------------------------
 
-    def build(self, include_external: bool, include_builtins: bool, include_unresolved: bool) -> dict:
+    def source_span(self, d: Def) -> tuple:
+        """(first, last) 1-based lines of a def's source, decorators included."""
+        if d.kind == "module":
+            return 1, len(self.sources[d.module])
+        first = min([d.lineno, *(x.lineno for x in getattr(d.node, "decorator_list", []))])
+        return first, d.end_lineno
+
+    def source_text(self, d: Def) -> str:
+        first, last = self.source_span(d)
+        return "".join(self.sources[d.module][first - 1 : last])
+
+    def build(
+        self,
+        include_external: bool,
+        include_builtins: bool,
+        include_unresolved: bool,
+        include_text: bool = True,
+    ) -> dict:
         self.infer_types()
         agg: dict = {}
         stats = Counter()
@@ -942,6 +961,9 @@ class Project:
                 node["decorators"] = d.decorators
             if d.kind == "class":
                 node["bases"] = d.bases
+            if include_text:
+                node["text_lineno"] = self.source_span(d)[0]
+                node["text"] = self.source_text(d)
             nodes.append(node)
             stats[f"nodes_{d.kind}"] += 1
 
@@ -962,7 +984,10 @@ class Project:
                 }
             )
         for t in sorted(extra):
-            nodes.append({"id": t, "kind": self._category(t), "name": t.lstrip("?").rsplit(".", 1)[-1]})
+            ext = {"id": t, "kind": self._category(t), "name": t.lstrip("?").rsplit(".", 1)[-1]}
+            if include_text:
+                ext["text"] = ""  # no source available outside the analysed tree
+            nodes.append(ext)
 
         resolved = stats["call_sites_internal"] + stats["call_sites_external"] + stats["call_sites_builtin"]
         total = stats["call_sites"] or 1
@@ -983,7 +1008,7 @@ class Project:
         return {
             "meta": {
                 "generator": f"tools/callgraph/callgraph.py {__version__}",
-                "schema": 1,
+                "schema": 2,
                 "root": self.root.resolve().name,
                 "commit": git_commit(self.root),
                 "python": sys.version.split()[0],
@@ -991,6 +1016,7 @@ class Project:
                     "include_external": include_external,
                     "include_builtins": include_builtins,
                     "include_unresolved": include_unresolved,
+                    "include_text": include_text,
                 },
                 "warnings": self.warnings,
             },
@@ -1010,8 +1036,8 @@ class Project:
 
 
 def git_commit(root: Path) -> Optional[str]:
-    if os.environ.get("GITHUB_SHA"):
-        return os.environ["GITHUB_SHA"]
+    """Commit of the analysed checkout (git first: on pull_request events
+    GITHUB_SHA is a synthetic merge commit, not a commit in the branch)."""
     try:
         out = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "HEAD"],
@@ -1019,9 +1045,11 @@ def git_commit(root: Path) -> Optional[str]:
             text=True,
             check=True,
         )
-        return out.stdout.strip() or None
+        if out.stdout.strip():
+            return out.stdout.strip()
     except (OSError, subprocess.CalledProcessError):
-        return None
+        pass
+    return os.environ.get("GITHUB_SHA") or None
 
 
 def markdown_summary(graph: dict, top: int = 15) -> str:
@@ -1072,6 +1100,7 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--no-external", action="store_true", help="drop edges to third-party/stdlib targets")
     p.add_argument("--include-builtins", action="store_true", help="keep edges to builtins (len, isinstance, ...)")
     p.add_argument("--include-unresolved", action="store_true", help="keep edges to unresolved targets ('?name')")
+    p.add_argument("--no-text", action="store_true", help="omit each node's source text")
     p.add_argument("--summary", help="also write a markdown summary to this path")
     a = p.parse_args(argv)
 
@@ -1086,6 +1115,7 @@ def main(argv: Optional[list] = None) -> int:
         include_external=not a.no_external,
         include_builtins=a.include_builtins,
         include_unresolved=a.include_unresolved,
+        include_text=not a.no_text,
     )
     out = Path(a.output)
     out.parent.mkdir(parents=True, exist_ok=True)
