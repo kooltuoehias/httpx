@@ -33,12 +33,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator, Optional
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 BUILTIN_NAMES = frozenset(dir(builtins))
 DEFAULT_EXCLUDES = frozenset({".git", ".venv", "venv", "__pycache__", "build", "dist", "node_modules", ".tox"})
 FUNC_TYPES = (ast.FunctionDef, ast.AsyncFunctionDef)
 SCOPE_TYPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+# graph.json is networkx node_link data (swegemma format): edge "type" values.
+EDGE_TYPES = {"call": "calls", "instantiate": "instantiates"}
 PROPERTY_DECORATORS = {"property", "cached_property", "functools.cached_property"}
 # Return types of a few common external factories (extend as needed).
 KNOWN_RETURNS = {
@@ -914,7 +916,9 @@ class Project:
         include_builtins: bool,
         include_unresolved: bool,
         include_text: bool = True,
+        edges_key: str = "edges",
     ) -> dict:
+        """Return networkx node_link data: directed multigraph, edges keyed per (u, v)."""
         self.infer_types()
         agg: dict = {}
         stats = Counter()
@@ -969,6 +973,7 @@ class Project:
 
         extra = set()
         edges = []
+        next_key: Counter = Counter()  # multigraph key: 0, 1, ... per (source, target)
         for (src, tgt, kind), e in sorted(agg.items()):
             if tgt not in self.defs:
                 extra.add(tgt)
@@ -977,12 +982,14 @@ class Project:
                 {
                     "source": src,
                     "target": tgt,
-                    "kind": kind,
+                    "key": next_key[(src, tgt)],
+                    "type": EDGE_TYPES[kind],
                     "resolution": e["resolution"],
                     "count": len(lines),
                     "lines": lines,
                 }
             )
+            next_key[(src, tgt)] += 1
         for t in sorted(extra):
             ext = {"id": t, "kind": self._category(t), "name": t.lstrip("?").rsplit(".", 1)[-1]}
             if include_text:
@@ -1006,9 +1013,12 @@ class Project:
             "internal_edges": sum(1 for e in edges if e["target"] in self.defs),
         }
         return {
-            "meta": {
+            "directed": True,
+            "multigraph": True,
+            "graph": {
                 "generator": f"tools/callgraph/callgraph.py {__version__}",
-                "schema": 2,
+                "schema": 3,
+                "format": f"networkx node_link (edges under '{edges_key}')",
                 "root": self.root.resolve().name,
                 "commit": git_commit(self.root),
                 "python": sys.version.split()[0],
@@ -1019,10 +1029,10 @@ class Project:
                     "include_text": include_text,
                 },
                 "warnings": self.warnings,
+                "stats": summary,
             },
-            "stats": summary,
             "nodes": nodes,
-            "edges": edges,
+            edges_key: edges,
         }
 
     def _category(self, target: str) -> str:
@@ -1052,10 +1062,14 @@ def git_commit(root: Path) -> Optional[str]:
     return os.environ.get("GITHUB_SHA") or None
 
 
+def graph_edges(graph: dict) -> list:
+    return graph["edges"] if "edges" in graph else graph["links"]
+
+
 def markdown_summary(graph: dict, top: int = 15) -> str:
-    s = graph["stats"]
+    s = graph["graph"]["stats"]
     kinds = {n["id"]: n["kind"] for n in graph["nodes"]}
-    internal = [e for e in graph["edges"] if kinds.get(e["target"]) in ("function", "method", "class")]
+    internal = [e for e in graph_edges(graph) if kinds.get(e["target"]) in ("function", "method", "class")]
     fan_in = Counter()
     fan_out = Counter()
     for e in internal:
@@ -1064,7 +1078,7 @@ def markdown_summary(graph: dict, top: int = 15) -> str:
     lines = [
         "## Call graph",
         "",
-        f"Commit `{(graph['meta']['commit'] or 'unknown')[:12]}`",
+        f"Commit `{(graph['graph']['commit'] or 'unknown')[:12]}`",
         "",
         "| metric | value |",
         "|---|---|",
@@ -1101,6 +1115,12 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--include-builtins", action="store_true", help="keep edges to builtins (len, isinstance, ...)")
     p.add_argument("--include-unresolved", action="store_true", help="keep edges to unresolved targets ('?name')")
     p.add_argument("--no-text", action="store_true", help="omit each node's source text")
+    p.add_argument(
+        "--edges-key",
+        choices=("edges", "links"),
+        default="edges",
+        help="top-level key holding the edge list (networkx >=3.4 'edges'; older default 'links')",
+    )
     p.add_argument("--summary", help="also write a markdown summary to this path")
     a = p.parse_args(argv)
 
@@ -1116,13 +1136,14 @@ def main(argv: Optional[list] = None) -> int:
         include_builtins=a.include_builtins,
         include_unresolved=a.include_unresolved,
         include_text=not a.no_text,
+        edges_key=a.edges_key,
     )
     out = Path(a.output)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(graph, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     if a.summary:
         Path(a.summary).write_text(markdown_summary(graph), encoding="utf-8")
-    s = graph["stats"]
+    s = graph["graph"]["stats"]
     print(
         f"{len(files)} files | {s['classes']} classes, {s['functions']} functions, {s['methods']} methods | "
         f"{s['call_sites']} call sites, {s['resolved_ratio']:.1%} resolved | {s['edges']} edges -> {out}"

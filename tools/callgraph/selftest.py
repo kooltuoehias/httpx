@@ -193,9 +193,11 @@ def main() -> int:
         assert rc == 0, rc
         g = json.loads(out.read_text())
 
-    edges = {(e["source"], e["target"], e["kind"]) for e in g["edges"]}
+    edge_list = check_outputs.graph_edges(g)
+    kind_of = {"calls": "call", "instantiates": "instantiate"}
+    edges = {(e["source"], e["target"], kind_of[e["type"]]) for e in edge_list}
+    failures = list(check_outputs.check_node_link(g))
     kinds = {n["id"]: n["kind"] for n in g["nodes"]}
-    failures = []
     for exp in EXPECTED:
         if exp not in edges:
             failures.append(f"missing edge   {exp}")
@@ -205,9 +207,9 @@ def main() -> int:
     for nid, kind in EXPECTED_NODES.items():
         if kinds.get(nid) != kind:
             failures.append(f"node {nid}: expected {kind}, got {kinds.get(nid)}")
-    if not any(e["target"].startswith("?") for e in g["edges"]):
+    if not any(e["target"].startswith("?") for e in edge_list):
         failures.append("expected the unknown_obj() call to be reported as unresolved")
-    for e in g["edges"]:
+    for e in edge_list:
         assert e["count"] == len(e["lines"]) > 0, e
 
     # node source text
@@ -235,7 +237,7 @@ def main() -> int:
         print("\n".join(failures))
         print(f"FAILED {len(failures)} check(s)")
         return 1
-    print(f"OK: {len(EXPECTED)} edges, {len(EXPECTED_NODES)} nodes, stats={g['stats']}")
+    print(f"OK: {len(EXPECTED)} edges, {len(EXPECTED_NODES)} nodes, stats={g['graph']['stats']}")
     return 0
 
 
