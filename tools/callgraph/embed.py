@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa  -- standalone CI script, not litestar library code
 """Embed each graph node's source text -> embeddings/<repo>_<commit>.npz.
 
 npz layout: key = node id, value = float32[dim] (default 256), L2-normalised.
@@ -25,6 +26,13 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+
+__all__ = (
+    "encode",
+    "main",
+    "truncate_normalize",
+)
+
 
 DEFAULT_MODEL = "Snowflake/snowflake-arctic-embed-m-v1.5"
 # Prefixes recommended by the default model's card: documents get none,

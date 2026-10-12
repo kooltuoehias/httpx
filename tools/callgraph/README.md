@@ -82,8 +82,11 @@ Node kinds: `module`, `class`, `function`, `method`, plus `external`,
 `text` is the node's source, sliced verbatim from the file (original
 indentation, decorators included): lines `text_lineno`..`end_lineno`. A
 module's text is the whole file; a class's text includes its methods. A
-property getter and its setter (or `@overload` stubs) share one id, so their
-text holds all of those definitions. Nodes outside the tree have `"text": ""`.
+name defined more than once in one scope (property getter + setter,
+`@overload` stubs, one `def` per `if`/`elif` branch) is one node: its text is
+each definition's own source joined by a blank line, and `text_spans` lists
+the `[first, last]` lines of each, so code between the definitions is never
+included. Empty modules (blank `__init__.py`) have `"text": ""`. Nodes outside the tree have `"text": ""`.
 `--no-text` omits the field.
 
 ## Embeddings

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa  -- standalone CI script, not litestar library code
 """Static call-graph extractor for Python source trees (stdlib only).
 
 Pipeline
@@ -33,7 +34,26 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator, Optional
 
-__version__ = "0.3.0"
+__all__ = (
+    "Ctx",
+    "Def",
+    "ModuleInfo",
+    "Project",
+    "bound_names",
+    "dotted",
+    "git_commit",
+    "graph_edges",
+    "is_super_call",
+    "iter_py_files",
+    "literal_type",
+    "main",
+    "markdown_summary",
+    "module_name_for",
+    "walk_scope",
+)
+
+
+__version__ = "0.4.0"
 
 BUILTIN_NAMES = frozenset(dir(builtins))
 DEFAULT_EXCLUDES = frozenset({".git", ".venv", "venv", "__pycache__", "build", "dist", "node_modules", ".tox"})
@@ -899,16 +919,29 @@ class Project:
 
     # ---- graph -------------------------------------------------------------
 
-    def source_span(self, d: Def) -> tuple:
-        """(first, last) 1-based lines of a def's source, decorators included."""
+    def source_spans(self, d: Def) -> list:
+        """[(first, last), ...] 1-based line spans, decorators included.
+
+        One span per definition: a name redefined in the same scope (property
+        setter, @overload, if/else branches) shares one id but keeps each
+        definition's own span, so code between them is not included.
+        """
         if d.kind == "module":
-            return 1, len(self.sources[d.module])
-        first = min([d.lineno, *(x.lineno for x in getattr(d.node, "decorator_list", []))])
-        return first, d.end_lineno
+            return [(1, len(self.sources[d.module]))] if self.sources[d.module] else []
+        spans = []
+        for n in [d.node, *d.extra_nodes]:
+            first = min([n.lineno, *(x.lineno for x in getattr(n, "decorator_list", []))])
+            spans.append((first, n.end_lineno or n.lineno))
+        return spans
 
     def source_text(self, d: Def) -> str:
-        first, last = self.source_span(d)
-        return "".join(self.sources[d.module][first - 1 : last])
+        """Verbatim source of each span; spans joined by one blank line."""
+        lines = self.sources[d.module]
+        parts = []
+        for first, last in self.source_spans(d):
+            chunk = "".join(lines[first - 1 : last])
+            parts.append(chunk if chunk.endswith("\n") else chunk + "\n")
+        return "\n".join(parts)
 
     def build(
         self,
@@ -966,7 +999,9 @@ class Project:
             if d.kind == "class":
                 node["bases"] = d.bases
             if include_text:
-                node["text_lineno"] = self.source_span(d)[0]
+                spans = self.source_spans(d)
+                node["text_lineno"] = spans[0][0] if spans else 1
+                node["text_spans"] = [list(s) for s in spans]
                 node["text"] = self.source_text(d)
             nodes.append(node)
             stats[f"nodes_{d.kind}"] += 1
