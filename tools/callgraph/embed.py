@@ -98,8 +98,9 @@ def main(argv: Optional[list] = None) -> int:
     mat, info = encode([n["text"] for n in nodes], a.model, a.batch_size)
     vecs = truncate_normalize(mat, a.dim)
 
-    repo = a.repo or g["meta"].get("root") or "repo"
-    commit = g["meta"].get("commit") or "unknown"
+    gmeta = g["graph"]
+    repo = a.repo or gmeta.get("root") or "repo"
+    commit = gmeta.get("commit") or "unknown"
     out_dir = Path(a.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = f"{repo}_{commit}"

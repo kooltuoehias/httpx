@@ -31,9 +31,44 @@ def parses_as_def(n: dict) -> bool:
     return bool(body) and all(isinstance(s, DEF_TYPES) and s.name == n["name"] for s in body)
 
 
-def check_graph(g: dict) -> list:
+def graph_edges(g: dict) -> list:
+    return g["edges"] if "edges" in g else g["links"]
+
+
+def check_node_link(g: dict) -> list:
+    """networkx node_link / swegemma envelope and edge fields."""
     errs = []
-    s = g["stats"]
+    if g.get("directed") is not True or g.get("multigraph") is not True:
+        errs.append("top level must have directed=true, multigraph=true")
+    if not isinstance(g.get("graph"), dict):
+        errs.append("top level must have a 'graph' object")
+    if ("edges" in g) == ("links" in g):
+        errs.append("exactly one of 'edges' / 'links' must be present")
+        return errs
+    seen = set()
+    for e in graph_edges(g):
+        for f in ("source", "target", "key", "type"):
+            if f not in e:
+                errs.append(f"edge missing '{f}': {e}")
+                return errs
+        if e["type"] not in ("calls", "instantiates"):
+            errs.append(f"unknown edge type {e['type']!r}")
+        k = (e["source"], e["target"], e["key"])
+        if k in seen:
+            errs.append(f"duplicate (source, target, key): {k}")
+        seen.add(k)
+    for n in g["nodes"]:
+        if not ({"id", "name", "text"} <= n.keys()) and g["graph"]["options"].get("include_text", False):
+            errs.append(f"node missing id/name/text: {n.get('id')}")
+            break
+    return errs
+
+
+def check_graph(g: dict) -> list:
+    errs = check_node_link(g)
+    if errs:
+        return errs
+    s = g["graph"]["stats"]
     if not (s["classes"] and s["methods"] and s["functions"]):
         errs.append(f"empty graph stats: {s}")
     if s["internal_edges"] <= 0:
@@ -42,10 +77,10 @@ def check_graph(g: dict) -> list:
     if len(ids) != len(set(ids)):
         errs.append("duplicate node ids")
     idset = set(ids)
-    dangling = [e for e in g["edges"] if e["source"] not in idset or e["target"] not in idset]
+    dangling = [e for e in graph_edges(g) if e["source"] not in idset or e["target"] not in idset]
     if dangling:
         errs.append(f"{len(dangling)} dangling edges, e.g. {dangling[:3]}")
-    if g["meta"]["options"].get("include_text", False):
+    if g["graph"]["options"].get("include_text", False):
         for n in g["nodes"]:
             if "text" not in n:
                 errs.append(f"node without text field: {n['id']}")
@@ -65,7 +100,7 @@ def check_embeddings(g: dict, emb_dir: Path) -> list:
         return [f"expected one sidecar json in {emb_dir}, found {len(sidecars)}"]
     meta = json.loads(sidecars[0].read_text())
     npz_path = emb_dir / meta["file"]
-    expected_name = f"{meta['repo']}_{g['meta']['commit']}.npz"
+    expected_name = f"{meta['repo']}_{g['graph']['commit']}.npz"
     if npz_path.name != expected_name:
         errs.append(f"npz name {npz_path.name} != {expected_name}")
     data = np.load(npz_path)
@@ -120,7 +155,7 @@ def main() -> int:
     if errs:
         print("\n".join(f"ERROR: {e}" for e in errs))
         return 1
-    print(f"OK: {len(g['nodes'])} nodes, {len(g['edges'])} edges, stats={g['stats']}")
+    print(f"OK: {len(g['nodes'])} nodes, {len(graph_edges(g))} edges, stats={g['graph']['stats']}")
     return 0
 
 

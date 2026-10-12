@@ -68,7 +68,18 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install sentence-transformers numpy
+          pip install sentence-transformers numpy networkx
+
+      - name: Load graph.json with networkx (node_link)
+        run: |
+          python - <<'EOF'
+          import json, networkx as nx
+          d = json.load(open("out/graph.json"))
+          G = nx.node_link_graph(d, edges="edges")
+          assert G.is_directed() and G.is_multigraph()
+          assert G.number_of_nodes() == len(d["nodes"]) and G.number_of_edges() == len(d["edges"])
+          print(f"networkx {nx.__version__}: {type(G).__name__}, {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
+          EOF
 
       - name: Embed node text (256-d)
         env:

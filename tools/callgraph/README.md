@@ -44,27 +44,40 @@ class points at the base implementation, not subclass overrides.
 
 ## graph.json
 
+networkx `node_link` data (the swegemma format): a directed multigraph that
+loads directly with `networkx.node_link_graph(data, edges="edges")`.
+
 ```jsonc
 {
-  "meta":  { "generator": "...", "commit": "<sha>", "options": { ... } },
-  "stats": { "classes": 87, "methods": 361, "call_sites": 1559, "resolved_ratio": 0.84, ... },
+  "directed": true,
+  "multigraph": true,
+  "graph": {
+    "generator": "...", "schema": 3, "root": "httpx", "commit": "<sha>", "options": { ... },
+    "stats": { "classes": 87, "methods": 361, "call_sites": 1559, "resolved_ratio": 0.84, ... }
+  },
   "nodes": [
-    { "id": "httpx._client.Client.send", "kind": "method", "name": "send",
-      "qualname": "Client.send", "module": "httpx._client", "file": "httpx/_client.py",
-      "lineno": 879, "end_lineno": 928, "parent": "httpx._client.Client", "async": false,
-      "text_lineno": 879, "text": "    def send(\n        self,\n ..." },
-    { "id": "os.path.join", "kind": "external", "name": "join", "text": "" }
+    { "id": "httpx._client.Client.send", "name": "send", "text": "    def send(\n        self,\n ...",
+      "kind": "method", "qualname": "Client.send", "module": "httpx._client", "file": "httpx/_client.py",
+      "lineno": 879, "end_lineno": 928, "text_lineno": 879, "parent": "httpx._client.Client", "async": false },
+    { "id": "os.path.join", "name": "join", "text": "", "kind": "external" }
   ],
   "edges": [
     { "source": "httpx._client.Client.send", "target": "httpx._models.Response.close",
-      "kind": "call", "resolution": "type", "count": 1, "lines": [927] }
+      "key": 0, "type": "calls", "resolution": "type", "count": 1, "lines": [927] }
   ]
 }
 ```
 
+Every node has `id`, `name`, `text`; the other node fields are extra
+attributes. Edge `type` is `calls`, or `instantiates` for `Cls(...)` (which
+also produces a `calls` edge to `Cls.__init__`). Edges are aggregated per
+(source, target, type), so `key` is the networkx multigraph key (0, 1, ...
+per source/target pair); `lines` lists every call site. Every edge endpoint is
+a node. `--edges-key links` writes the edge list under `links` instead (the
+default key of networkx < 3.4).
+
 Node kinds: `module`, `class`, `function`, `method`, plus `external`,
-`builtin`, `unresolved` for call targets outside the tree. Edges are
-aggregated per (source, target, kind); `lines` lists every call site.
+`builtin`, `unresolved` for call targets outside the tree.
 
 `text` is the node's source, sliced verbatim from the file (original
 indentation, decorators included): lines `text_lineno`..`end_lineno`. A
