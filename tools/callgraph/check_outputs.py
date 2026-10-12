@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa  -- standalone CI script, not litestar library code
 """Validate graph.json (and optionally the embeddings npz) produced in CI.
 
 python tools/callgraph/check_outputs.py out/graph.json
@@ -14,21 +15,48 @@ import sys
 import textwrap
 from pathlib import Path
 
+__all__ = (
+    "check_embeddings",
+    "check_graph",
+    "check_node_link",
+    "graph_edges",
+    "main",
+    "parses_as_def",
+    "text_segments",
+)
+
+
 TEXT_KINDS = ("module", "class", "function", "method")
 DEF_TYPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 
 
-def parses_as_def(n: dict) -> bool:
-    """The text must parse to def/class statements named like the node and nothing else.
+def text_segments(n: dict) -> list:
+    """Split a node's text back into its per-definition spans (see text_spans)."""
+    lines = n["text"].splitlines(keepends=True)
+    spans = n.get("text_spans") or [[1, len(lines)]]
+    out, pos = [], 0
+    for i, (first, last) in enumerate(spans):
+        size = last - first + 1
+        out.append("".join(lines[pos : pos + size]))
+        pos += size + (1 if i < len(spans) - 1 else 0)  # blank separator line
+    if pos != len(lines):
+        return []
+    return out
 
-    Several statements happen for redefinitions sharing one id (property
-    getter + setter, @overload stubs); unrelated code in between is an error.
-    """
-    try:
-        body = ast.parse(textwrap.dedent(n["text"])).body
-    except SyntaxError:
+
+def parses_as_def(n: dict) -> bool:
+    """Each span of the text must parse to exactly one def/class with the node's name."""
+    segments = text_segments(n)
+    if not segments:
         return False
-    return bool(body) and all(isinstance(s, DEF_TYPES) and s.name == n["name"] for s in body)
+    for seg in segments:
+        try:
+            body = ast.parse(textwrap.dedent(seg)).body
+        except SyntaxError:
+            return False
+        if len(body) != 1 or not isinstance(body[0], DEF_TYPES) or body[0].name != n["name"]:
+            return False
+    return True
 
 
 def graph_edges(g: dict) -> list:
@@ -84,8 +112,8 @@ def check_graph(g: dict) -> list:
         for n in g["nodes"]:
             if "text" not in n:
                 errs.append(f"node without text field: {n['id']}")
-            elif n["kind"] in TEXT_KINDS and not n["text"].strip():
-                errs.append(f"empty text: {n['id']}")
+            elif n["kind"] in ("class", "function", "method") and not n["text"].strip():
+                errs.append(f"empty text: {n['id']}")  # empty modules (blank __init__.py) are fine
             elif n["kind"] in ("class", "function", "method") and not parses_as_def(n):
                 errs.append(f"text of {n['id']} is not exactly its definition")
     return errs

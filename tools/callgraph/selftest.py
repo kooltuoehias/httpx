@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa  -- standalone CI script, not litestar library code
 """Self-test for callgraph.py on a small fixture package (no pytest needed).
 
 Named selftest.py (not test_*.py) so httpx's own pytest run won't collect it.
@@ -111,6 +112,27 @@ FILES = {
 
         helper("module-level")
     """,
+    "pkg/empty/__init__.py": "",
+    "pkg/branchy.py": """
+        def make_handler(flag):
+            if flag:
+
+                def handler(x):
+                    return x + 1
+
+            elif flag is None:
+                marker = "BETWEEN"
+
+                def handler(x):
+                    return x - 1
+
+            else:
+
+                def handler(x):
+                    return x
+
+            return handler
+    """,
     "pkg/cli.py": """
         import pkg
         from pkg import Engine as E
@@ -222,13 +244,19 @@ def main() -> int:
         (f"{C}.Engine.run.<locals>.inner", lambda t: t.strip() == "def inner():\n            self.prepare()", "nested"),
         (f"{C}.Part", lambda t: "def spin" in t and "def name" in t and "class Base" not in t, "class span"),
         ("os.path.join", lambda t: t == "", "external has empty text"),
+        ("pkg.empty", lambda t: t == "", "empty __init__ has empty text"),
+        (
+            "pkg.branchy.make_handler.<locals>.handler",
+            lambda t: t.count("def handler") == 3 and "BETWEEN" not in t and "elif" not in t,
+            "branch redefinitions: each def only, no code between",
+        ),
     ]
     for nid, ok, what in text_checks:
         t = by_id.get(nid, {}).get("text")
         if t is None or not ok(t):
             failures.append(f"text check failed ({what}): {nid} -> {t!r}")
     for n in g["nodes"]:
-        if n["kind"] in ("module", "class", "function", "method") and not n.get("text"):
+        if n["kind"] in ("class", "function", "method") and not n.get("text"):
             failures.append(f"empty text on {n['id']}")
         if n["kind"] in ("class", "function", "method") and not check_outputs.parses_as_def(n):
             failures.append(f"text of {n['id']} is not exactly its definition")
